@@ -3,6 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Async read and write for networ
 use tokio::net::TcpListener; // Allows sever to listen for TCP connections
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
 struct Client {
     stream: Arc<Mutex<TcpStream>>,
@@ -61,14 +62,15 @@ async fn main() -> tokio::io::Result<()> {
                 let message = {
                     //Creates a new scope
                     let mut socket_locked = socket.lock().await; //lock the socket so it can be read or written to
-                    match socket_locked.read(&mut buffer).await {
+                    match timeout(Duration::from_millis(10), socket_locked.read(&mut buffer)).await
+                    {
                         //Attempt to read the socket into the buffer
-                        Ok(0) => {
+                        Ok(Ok(0)) => {
                             //0 read, client disconnected
                             println!("Client {} ({}) disconnected", username, addr);
                             break; // Break connection
                         }
-                        Ok(n) => {
+                        Ok(Ok(n)) => {
                             println!("Client {} ({}) has sent a message", username, addr);
                             // Create a formatted message with the username
                             let raw_message =
@@ -77,16 +79,20 @@ async fn main() -> tokio::io::Result<()> {
                             // Only broadcast if the message is not empty
                             if !raw_message.is_empty() {
                                 let formatted_message =
-                                    format!("{}: {}\r\n\r\n", username, raw_message);
+                                    format!("{}: {}\r\n", username, raw_message);
                                 Some(formatted_message.into_bytes())
                             } else {
                                 None
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             // Error reading
                             eprintln!("Error reading from client {} ({}): {}", username, addr, e);
                             break;
+                        }
+                        Err(_) => {
+                            //eprintln!("Timeout error reading from client {} ({})", username, addr);
+                            None
                         }
                     }
                 }; // Socket lock released here
@@ -103,10 +109,8 @@ async fn main() -> tokio::io::Result<()> {
                             continue; // Skip sending message to the sender (who's socket matches)
                         }
 
-                        println!("waiting to aquire this lock...");
                         let mut client_locked: tokio::sync::MutexGuard<'_, TcpStream> =
                             c.stream.lock().await; //aquire the mutex lock for a given client
-                        println!("lock aquired");
 
                         if let Err(e) = client_locked.write_all(&message).await {
                             //Try to write the message to the current client
