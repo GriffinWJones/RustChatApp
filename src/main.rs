@@ -49,6 +49,10 @@ async fn main() -> tokio::io::Result<()> {
         } // This is the end of the new scope
           //Putting the above code in a new scope is needed because when a client exits the code block, the lock is automatically released and other clients can now aquire the lock and add their socket
 
+        let clients_clone = Arc::clone(&clients);
+        let join_message = format!("*** {} has joined the chat! ***", username);
+        broadcast_message_from_server(&clients_clone, &join_message).await;
+
         let clients_for_task = Arc::clone(&clients); //Creates a reference to data in clients that will be used in the task spawned in the next line
 
         tokio::spawn(async move {
@@ -75,6 +79,11 @@ async fn main() -> tokio::io::Result<()> {
                             // Create a formatted message with the username
                             let raw_message =
                                 String::from_utf8_lossy(&buffer[..n]).trim().to_string();
+
+                            if raw_message == "EXIT" {
+                                println!("Client {} ({}) disconnected", username, addr);
+                                break; // Break connection
+                            }
 
                             // Only broadcast if the message is not empty
                             if !raw_message.is_empty() {
@@ -127,13 +136,34 @@ async fn main() -> tokio::io::Result<()> {
                     } //At the end of each iteration the given client's lock is released
                 }
             }
+            let leave_message = format!("*** {} has left the chat. ***", username);
+            broadcast_message_from_server(&clients_for_task, &leave_message).await;
+            println!("Client {} removed from clients list", addr);
+
             //This only runs in the task after a client disconnects
             let mut clients_locked = clients_for_task.lock().await; //aquire the mutex lock for the whole vector
             clients_locked.retain(|c| !Arc::ptr_eq(&c.stream, &socket));
             //This filers the clients_locked by only keeping clients who arent the current client
             //This is because this code runs when a client disconnects, so the current client should be taken out of the list of clients
-            println!("Client {} removed from clients list", addr);
         });
+    }
+}
+
+async fn broadcast_message_from_server(clients: &Arc<Mutex<Vec<Client>>>, message: &str) {
+    let formatted_message = format!("Server: {}\r\n", message);
+
+    let clients_locked = clients.lock().await;
+
+    for c in clients_locked.iter() {
+        let mut client_locked = c.stream.lock().await;
+
+        if let Err(e) = client_locked.write_all(formatted_message.as_bytes()).await {
+            eprintln!("Failed to write to client {}: {}", c.username, e);
+        }
+
+        if let Err(e) = client_locked.flush().await {
+            eprintln!("Failed to flush message to client {}: {}", c.username, e);
+        }
     }
 }
 
